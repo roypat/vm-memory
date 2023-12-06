@@ -3,11 +3,11 @@
 //! Module containing versions of the standard library's [`Read`](std::io::Read) and
 //! [`Write`](std::io::Write) traits compatible with volatile memory accesses.
 
+use crate::bitmap::Bitmap;
 use crate::volatile_memory::copy_slice_impl::{copy_from_volatile_slice, copy_to_volatile_slice};
 use crate::{VolatileMemoryError, VolatileSlice};
 use std::io::{Cursor, ErrorKind, Stdout};
 use std::os::fd::AsRawFd;
-use crate::bitmap::Bitmap;
 
 /// A version of the standard library's [`Read`](std::io::Read) trait that operates on volatile
 /// memory instead of slices

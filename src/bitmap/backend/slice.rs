@@ -7,7 +7,7 @@ use std::fmt::{self, Debug};
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::bitmap::{Bitmap};
+use crate::bitmap::Bitmap;
 
 /// Represents a slice into a `Bitmap` object, starting at `base_offset`.
 #[derive(Clone, Copy)]

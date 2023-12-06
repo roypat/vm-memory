@@ -473,7 +473,9 @@ pub trait GuestMemory {
 
     ///
     type Iter<'a>: Iterator<Item = &'a Self::R>
-    where Self::R: 'a, Self: 'a;
+    where
+        Self::R: 'a,
+        Self: 'a;
 
     /// Returns the number of regions in the collection.
     fn num_regions(&self) -> usize;

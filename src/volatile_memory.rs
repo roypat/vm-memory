@@ -471,7 +471,13 @@ impl<'a, B: Bitmap> VolatileSlice<'a, B> {
     /// assert_eq!(8, start.len());
     /// assert_eq!(24, end.len());
     /// ```
-    pub fn split_at(&self, mid: usize) -> Result<(VolatileSlice<'_, B::Slice<'_>>, VolatileSlice<'_, B::Slice<'_>>)> {
+    pub fn split_at(
+        &self,
+        mid: usize,
+    ) -> Result<(
+        VolatileSlice<'_, B::Slice<'_>>,
+        VolatileSlice<'_, B::Slice<'_>>,
+    )> {
         let end = self.offset(mid)?;
         let start =
             // SAFETY: safe because self.offset() already checked the bounds
