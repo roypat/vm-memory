@@ -7,7 +7,7 @@ use std::fmt::{self, Debug};
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::bitmap::{Bitmap, BitmapSlice, WithBitmapSlice};
+use crate::bitmap::{Bitmap};
 
 /// Represents a slice into a `Bitmap` object, starting at `base_offset`.
 #[derive(Clone, Copy)]
@@ -26,26 +26,13 @@ impl<B> BaseSlice<B> {
     }
 }
 
-impl<'a, B> WithBitmapSlice<'a> for BaseSlice<B>
-where
-    B: Clone + Deref,
-    B::Target: Bitmap,
-{
-    type S = Self;
-}
-
-impl<B> BitmapSlice for BaseSlice<B>
-where
-    B: Clone + Deref,
-    B::Target: Bitmap,
-{
-}
-
 impl<B> Bitmap for BaseSlice<B>
 where
     B: Clone + Deref,
     B::Target: Bitmap,
 {
+    type Slice<'a> = Self where B: 'a;
+
     /// Mark the memory range specified by the given `offset` (relative to the base offset of
     /// the slice) and `len` as dirtied.
     fn mark_dirty(&self, offset: usize, len: usize) {
@@ -63,7 +50,7 @@ where
     }
 
     /// Create a new `BitmapSlice` starting from the specified `offset` into the current slice.
-    fn slice_at(&self, offset: usize) -> Self {
+    fn slice_at(&self, offset: usize) -> Self::Slice<'_> {
         BaseSlice {
             inner: self.inner.clone(),
             base_offset: self.base_offset.wrapping_add(offset),

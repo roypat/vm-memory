@@ -4,7 +4,7 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::bitmap::{ArcSlice, AtomicBitmap, Bitmap, WithBitmapSlice};
+use crate::bitmap::{ArcSlice, AtomicBitmap, Bitmap};
 
 #[cfg(feature = "backend-mmap")]
 use crate::mmap::NewBitmap;
@@ -41,11 +41,9 @@ impl Deref for AtomicBitmapArc {
     }
 }
 
-impl WithBitmapSlice<'_> for AtomicBitmapArc {
-    type S = ArcSlice<AtomicBitmap>;
-}
-
 impl Bitmap for AtomicBitmapArc {
+    type Slice<'a> = ArcSlice<AtomicBitmap>;
+
     fn mark_dirty(&self, offset: usize, len: usize) {
         self.inner.set_addr_range(offset, len)
     }
@@ -54,7 +52,7 @@ impl Bitmap for AtomicBitmapArc {
         self.inner.is_addr_set(offset)
     }
 
-    fn slice_at(&self, offset: usize) -> <Self as WithBitmapSlice>::S {
+    fn slice_at(&self, offset: usize) -> ArcSlice<AtomicBitmap> {
         ArcSlice::new(self.inner.clone(), offset)
     }
 }

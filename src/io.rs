@@ -3,11 +3,11 @@
 //! Module containing versions of the standard library's [`Read`](std::io::Read) and
 //! [`Write`](std::io::Write) traits compatible with volatile memory accesses.
 
-use crate::bitmap::BitmapSlice;
 use crate::volatile_memory::copy_slice_impl::{copy_from_volatile_slice, copy_to_volatile_slice};
 use crate::{VolatileMemoryError, VolatileSlice};
 use std::io::{Cursor, ErrorKind, Stdout};
 use std::os::fd::AsRawFd;
+use crate::bitmap::Bitmap;
 
 /// A version of the standard library's [`Read`](std::io::Read) trait that operates on volatile
 /// memory instead of slices
@@ -21,7 +21,7 @@ pub trait ReadVolatile {
     /// were read.
     ///
     /// The behavior of implementations should be identical to [`Read::read`](std::io::Read::read)
-    fn read_volatile<B: BitmapSlice>(
+    fn read_volatile<B: Bitmap>(
         &mut self,
         buf: &mut VolatileSlice<B>,
     ) -> Result<usize, VolatileMemoryError>;
@@ -30,16 +30,16 @@ pub trait ReadVolatile {
     /// if insufficient bytes could be read.
     ///
     /// The default implementation is identical to that of [`Read::read_exact`](std::io::Read::read_exact)
-    fn read_exact_volatile<B: BitmapSlice>(
+    fn read_exact_volatile<B: Bitmap>(
         &mut self,
         buf: &mut VolatileSlice<B>,
     ) -> Result<(), VolatileMemoryError> {
         // Implementation based on https://github.com/rust-lang/rust/blob/7e7483d26e3cec7a44ef00cf7ae6c9c8c918bec6/library/std/src/io/mod.rs#L465
 
-        let mut partial_buf = buf.offset(0)?;
+        let mut total_bytes_read = 0;
 
-        while !partial_buf.is_empty() {
-            match self.read_volatile(&mut partial_buf) {
+        while total_bytes_read < buf.len() {
+            match self.read_volatile(&mut buf.offset(total_bytes_read)?) {
                 Err(VolatileMemoryError::IOError(err)) if err.kind() == ErrorKind::Interrupted => {
                     continue
                 }
@@ -49,7 +49,7 @@ pub trait ReadVolatile {
                         "failed to fill whole buffer",
                     )))
                 }
-                Ok(bytes_read) => partial_buf = partial_buf.offset(bytes_read)?,
+                Ok(bytes_read) => total_bytes_read += bytes_read,
                 Err(err) => return Err(err),
             }
         }
@@ -70,7 +70,7 @@ pub trait WriteVolatile {
     /// were written.
     ///
     /// The behavior of implementations should be identical to [`Write::write`](std::io::Write::write)
-    fn write_volatile<B: BitmapSlice>(
+    fn write_volatile<B: Bitmap>(
         &mut self,
         buf: &VolatileSlice<B>,
     ) -> Result<usize, VolatileMemoryError>;
@@ -79,16 +79,16 @@ pub trait WriteVolatile {
     /// error if not all bytes could be written.
     ///
     /// The default implementation is identical to that of [`Write::write_all`](std::io::Write::write_all)
-    fn write_all_volatile<B: BitmapSlice>(
+    fn write_all_volatile<B: Bitmap>(
         &mut self,
         buf: &VolatileSlice<B>,
     ) -> Result<(), VolatileMemoryError> {
         // Based on https://github.com/rust-lang/rust/blob/7e7483d26e3cec7a44ef00cf7ae6c9c8c918bec6/library/std/src/io/mod.rs#L1570
 
-        let mut partial_buf = buf.offset(0)?;
+        let mut total_bytes_written = 0;
 
-        while !partial_buf.is_empty() {
-            match self.write_volatile(&partial_buf) {
+        while total_bytes_written < buf.len() {
+            match self.write_volatile(&buf.offset(total_bytes_written)?) {
                 Err(VolatileMemoryError::IOError(err)) if err.kind() == ErrorKind::Interrupted => {
                     continue
                 }
@@ -98,7 +98,7 @@ pub trait WriteVolatile {
                         "failed to write whole buffer",
                     )))
                 }
-                Ok(bytes_written) => partial_buf = partial_buf.offset(bytes_written)?,
+                Ok(bytes_written) => total_bytes_written += bytes_written,
                 Err(err) => return Err(err),
             }
         }
@@ -115,7 +115,7 @@ pub trait WriteVolatile {
 macro_rules! impl_read_write_volatile_for_raw_fd {
     ($raw_fd_ty:ty) => {
         impl ReadVolatile for $raw_fd_ty {
-            fn read_volatile<B: BitmapSlice>(
+            fn read_volatile<B: Bitmap>(
                 &mut self,
                 buf: &mut VolatileSlice<B>,
             ) -> Result<usize, VolatileMemoryError> {
@@ -124,7 +124,7 @@ macro_rules! impl_read_write_volatile_for_raw_fd {
         }
 
         impl WriteVolatile for $raw_fd_ty {
-            fn write_volatile<B: BitmapSlice>(
+            fn write_volatile<B: Bitmap>(
                 &mut self,
                 buf: &VolatileSlice<B>,
             ) -> Result<usize, VolatileMemoryError> {
@@ -135,7 +135,7 @@ macro_rules! impl_read_write_volatile_for_raw_fd {
 }
 
 impl WriteVolatile for Stdout {
-    fn write_volatile<B: BitmapSlice>(
+    fn write_volatile<B: Bitmap>(
         &mut self,
         buf: &VolatileSlice<B>,
     ) -> Result<usize, VolatileMemoryError> {
@@ -154,7 +154,7 @@ impl_read_write_volatile_for_raw_fd!(std::os::fd::BorrowedFd<'_>);
 /// Returns the numbers of bytes read.
 fn read_volatile_raw_fd<Fd: AsRawFd>(
     raw_fd: &mut Fd,
-    buf: &mut VolatileSlice<impl BitmapSlice>,
+    buf: &mut VolatileSlice<impl Bitmap>,
 ) -> Result<usize, VolatileMemoryError> {
     let fd = raw_fd.as_raw_fd();
     let guard = buf.ptr_guard_mut();
@@ -184,7 +184,7 @@ fn read_volatile_raw_fd<Fd: AsRawFd>(
 /// Returns the numbers of bytes written.
 fn write_volatile_raw_fd<Fd: AsRawFd>(
     raw_fd: &mut Fd,
-    buf: &VolatileSlice<impl BitmapSlice>,
+    buf: &VolatileSlice<impl Bitmap>,
 ) -> Result<usize, VolatileMemoryError> {
     let fd = raw_fd.as_raw_fd();
     let guard = buf.ptr_guard();
@@ -204,7 +204,7 @@ fn write_volatile_raw_fd<Fd: AsRawFd>(
 }
 
 impl WriteVolatile for &mut [u8] {
-    fn write_volatile<B: BitmapSlice>(
+    fn write_volatile<B: Bitmap>(
         &mut self,
         buf: &VolatileSlice<B>,
     ) -> Result<usize, VolatileMemoryError> {
@@ -226,7 +226,7 @@ impl WriteVolatile for &mut [u8] {
         Ok(written)
     }
 
-    fn write_all_volatile<B: BitmapSlice>(
+    fn write_all_volatile<B: Bitmap>(
         &mut self,
         buf: &VolatileSlice<B>,
     ) -> Result<(), VolatileMemoryError> {
@@ -243,7 +243,7 @@ impl WriteVolatile for &mut [u8] {
 }
 
 impl ReadVolatile for &[u8] {
-    fn read_volatile<B: BitmapSlice>(
+    fn read_volatile<B: Bitmap>(
         &mut self,
         buf: &mut VolatileSlice<B>,
     ) -> Result<usize, VolatileMemoryError> {
@@ -264,7 +264,7 @@ impl ReadVolatile for &[u8] {
         Ok(read)
     }
 
-    fn read_exact_volatile<B: BitmapSlice>(
+    fn read_exact_volatile<B: Bitmap>(
         &mut self,
         buf: &mut VolatileSlice<B>,
     ) -> Result<(), VolatileMemoryError> {
@@ -283,7 +283,7 @@ impl ReadVolatile for &[u8] {
 // WriteVolatile implementation for Vec<u8> is based upon the Write impl for Vec, which
 // defers to Vec::append_elements, after which the below functionality is modelled.
 impl WriteVolatile for Vec<u8> {
-    fn write_volatile<B: BitmapSlice>(
+    fn write_volatile<B: Bitmap>(
         &mut self,
         buf: &VolatileSlice<B>,
     ) -> Result<usize, VolatileMemoryError> {
@@ -317,7 +317,7 @@ impl<T> ReadVolatile for Cursor<T>
 where
     T: AsRef<[u8]>,
 {
-    fn read_volatile<B: BitmapSlice>(
+    fn read_volatile<B: Bitmap>(
         &mut self,
         buf: &mut VolatileSlice<B>,
     ) -> Result<usize, VolatileMemoryError> {
@@ -328,7 +328,7 @@ where
         Ok(n)
     }
 
-    fn read_exact_volatile<B: BitmapSlice>(
+    fn read_exact_volatile<B: Bitmap>(
         &mut self,
         buf: &mut VolatileSlice<B>,
     ) -> Result<(), VolatileMemoryError> {
@@ -342,7 +342,7 @@ where
 }
 
 impl WriteVolatile for Cursor<&mut [u8]> {
-    fn write_volatile<B: BitmapSlice>(
+    fn write_volatile<B: Bitmap>(
         &mut self,
         buf: &VolatileSlice<B>,
     ) -> Result<usize, VolatileMemoryError> {

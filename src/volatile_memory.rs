@@ -34,7 +34,7 @@ use std::sync::atomic::Ordering;
 use std::usize;
 
 use crate::atomic_integer::AtomicInteger;
-use crate::bitmap::{Bitmap, BitmapSlice, BS};
+use crate::bitmap::{Bitmap, BS};
 use crate::{AtomicAccess, ByteValued, Bytes};
 
 #[cfg(all(feature = "backend-mmap", feature = "xen", unix))]
@@ -393,7 +393,7 @@ impl<'a> VolatileSlice<'a, ()> {
     }
 }
 
-impl<'a, B: BitmapSlice> VolatileSlice<'a, B> {
+impl<'a, B: Bitmap> VolatileSlice<'a, B> {
     /// Creates a slice of raw memory that must support volatile access, and uses the provided
     /// `bitmap` object for dirty page tracking.
     ///
@@ -449,7 +449,7 @@ impl<'a, B: BitmapSlice> VolatileSlice<'a, B> {
         self.size == 0
     }
 
-    /// Borrows the inner `BitmapSlice`.
+    /// Borrows the inner `Bitmap`.
     pub fn bitmap(&self) -> &B {
         &self.bitmap
     }
@@ -471,11 +471,11 @@ impl<'a, B: BitmapSlice> VolatileSlice<'a, B> {
     /// assert_eq!(8, start.len());
     /// assert_eq!(24, end.len());
     /// ```
-    pub fn split_at(&self, mid: usize) -> Result<(Self, Self)> {
+    pub fn split_at(&self, mid: usize) -> Result<(VolatileSlice<'_, B::Slice<'_>>, VolatileSlice<'_, B::Slice<'_>>)> {
         let end = self.offset(mid)?;
         let start =
             // SAFETY: safe because self.offset() already checked the bounds
-            unsafe { VolatileSlice::with_bitmap(self.addr, mid, self.bitmap.clone(), self.mmap) };
+            unsafe { VolatileSlice::with_bitmap(self.addr, mid, self.bitmap.slice_at(0), self.mmap) };
 
         Ok((start, end))
     }
@@ -485,7 +485,7 @@ impl<'a, B: BitmapSlice> VolatileSlice<'a, B> {
     ///
     /// The returned subslice is a copy of this slice with the address increased by `offset` bytes
     /// and the size set to `count` bytes.
-    pub fn subslice(&self, offset: usize, count: usize) -> Result<Self> {
+    pub fn subslice(&self, offset: usize, count: usize) -> Result<VolatileSlice<'_, B::Slice<'_>>> {
         let _ = self.compute_end_offset(offset, count)?;
 
         // SAFETY: This is safe because the pointer is range-checked by compute_end_offset, and
@@ -505,7 +505,7 @@ impl<'a, B: BitmapSlice> VolatileSlice<'a, B> {
     ///
     /// The returned subslice is a copy of this slice with the address increased by `count` bytes
     /// and the size reduced by `count` bytes.
-    pub fn offset(&self, count: usize) -> Result<VolatileSlice<'a, B>> {
+    pub fn offset(&self, count: usize) -> Result<VolatileSlice<'_, B::Slice<'_>>> {
         let new_addr = (self.addr as usize)
             .checked_add(count)
             .ok_or(Error::Overflow {
@@ -593,7 +593,7 @@ impl<'a, B: BitmapSlice> VolatileSlice<'a, B> {
     ///         .expect("Could not get VolatileSlice"),
     /// );
     /// ```
-    pub fn copy_to_volatile_slice<S: BitmapSlice>(&self, slice: VolatileSlice<S>) {
+    pub fn copy_to_volatile_slice<S: Bitmap>(&self, slice: VolatileSlice<S>) {
         // SAFETY: Safe because the pointers are range-checked when the slices
         // are created, and they never escape the VolatileSlices.
         // FIXME: ... however, is it really okay to mix non-volatile
@@ -669,7 +669,7 @@ impl<'a, B: BitmapSlice> VolatileSlice<'a, B> {
     }
 }
 
-impl<B: BitmapSlice> Bytes<usize> for VolatileSlice<'_, B> {
+impl<B: Bitmap> Bytes<usize> for VolatileSlice<'_, B> {
     type E = Error;
 
     /// # Examples
@@ -993,14 +993,14 @@ impl<B: BitmapSlice> Bytes<usize> for VolatileSlice<'_, B> {
     }
 }
 
-impl<B: BitmapSlice> VolatileMemory for VolatileSlice<'_, B> {
+impl<B: Bitmap> VolatileMemory for VolatileSlice<'_, B> {
     type B = B;
 
     fn len(&self) -> usize {
         self.size
     }
 
-    fn get_slice(&self, offset: usize, count: usize) -> Result<VolatileSlice<B>> {
+    fn get_slice(&self, offset: usize, count: usize) -> Result<VolatileSlice<B::Slice<'_>>> {
         let _ = self.compute_end_offset(offset, count)?;
         Ok(
             // SAFETY: This is safe because the pointer is range-checked by compute_end_offset, and
@@ -1060,7 +1060,7 @@ where
 impl<'a, T, B> VolatileRef<'a, T, B>
 where
     T: ByteValued,
-    B: BitmapSlice,
+    B: Bitmap,
 {
     /// Creates a [`VolatileRef`](struct.VolatileRef.html) to an instance of `T`, using the
     /// provided `bitmap` object for dirty page tracking.
@@ -1116,7 +1116,7 @@ where
         size_of::<T>()
     }
 
-    /// Borrows the inner `BitmapSlice`.
+    /// Borrows the inner `Bitmap`.
     pub fn bitmap(&self) -> &B {
         &self.bitmap
     }
@@ -1203,7 +1203,7 @@ where
 impl<'a, T, B> VolatileArrayRef<'a, T, B>
 where
     T: ByteValued,
-    B: BitmapSlice,
+    B: Bitmap,
 {
     /// Creates a [`VolatileArrayRef`](struct.VolatileArrayRef.html) to an array of elements of
     /// type `T`, using the provided `bitmap` object for dirty page tracking.
@@ -1294,7 +1294,7 @@ where
         PtrGuardMut::write(self.mmap, self.addr, self.len())
     }
 
-    /// Borrows the inner `BitmapSlice`.
+    /// Borrows the inner `Bitmap`.
     pub fn bitmap(&self) -> &B {
         &self.bitmap
     }
@@ -1317,7 +1317,7 @@ where
     /// # Panics
     ///
     /// Panics if `index` is less than the number of elements of the array to which `&self` points.
-    pub fn ref_at(&self, index: usize) -> VolatileRef<'a, T, B> {
+    pub fn ref_at(&self, index: usize) -> VolatileRef<'_, T, B::Slice<'_>> {
         assert!(index < self.nelem);
         // SAFETY: Safe because the memory has the same lifetime and points to a subset of the
         // memory of the VolatileArrayRef.
@@ -1417,7 +1417,7 @@ where
     ///     assert_eq!(v, 0);
     /// }
     /// ```
-    pub fn copy_to_volatile_slice<S: BitmapSlice>(&self, slice: VolatileSlice<S>) {
+    pub fn copy_to_volatile_slice<S: Bitmap>(&self, slice: VolatileSlice<S>) {
         // SAFETY: Safe because the pointers are range-checked when the slices
         // are created, and they never escape the VolatileSlices.
         // FIXME: ... however, is it really okay to mix non-volatile
@@ -1485,7 +1485,7 @@ where
     }
 }
 
-impl<'a, B: BitmapSlice> From<VolatileSlice<'a, B>> for VolatileArrayRef<'a, u8, B> {
+impl<'a, B: Bitmap> From<VolatileSlice<'a, B>> for VolatileArrayRef<'a, u8, B> {
     fn from(slice: VolatileSlice<'a, B>) -> Self {
         // SAFETY: Safe because the result has the same lifetime and points to the same
         // memory as the incoming VolatileSlice.
@@ -1598,7 +1598,7 @@ pub(crate) mod copy_slice_impl {
     ///
     /// SAFETY: `slice` and `dst` must be point to a contiguously allocated memory region of at
     /// least length `total`. The regions must not overlap.
-    pub(crate) unsafe fn copy_from_volatile_slice<B: BitmapSlice>(
+    pub(crate) unsafe fn copy_from_volatile_slice<B: Bitmap>(
         dst: *mut u8,
         slice: &VolatileSlice<'_, B>,
         total: usize,
@@ -1613,7 +1613,7 @@ pub(crate) mod copy_slice_impl {
     ///
     /// SAFETY: `slice` and `src` must be point to a contiguously allocated memory region of at
     /// least length `total`. The regions must not overlap.
-    pub(crate) unsafe fn copy_to_volatile_slice<B: BitmapSlice>(
+    pub(crate) unsafe fn copy_to_volatile_slice<B: Bitmap>(
         slice: &VolatileSlice<'_, B>,
         src: *const u8,
         total: usize,

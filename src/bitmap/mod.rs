@@ -9,22 +9,10 @@
 #[cfg(any(test, feature = "backend-bitmap"))]
 mod backend;
 
-use std::fmt::Debug;
-
 use crate::{GuestMemory, GuestMemoryRegion};
 
 #[cfg(any(test, feature = "backend-bitmap"))]
 pub use backend::{ArcSlice, AtomicBitmap, RefSlice};
-
-/// Trait implemented by types that support creating `BitmapSlice` objects.
-pub trait WithBitmapSlice<'a> {
-    /// Type of the bitmap slice.
-    type S: BitmapSlice;
-}
-
-/// Trait used to represent that a `BitmapSlice` is a `Bitmap` itself, but also satisfies the
-/// restriction that slices created from it have the same type as `Self`.
-pub trait BitmapSlice: Bitmap + Clone + Debug + for<'a> WithBitmapSlice<'a, S = Self> {}
 
 /// Common bitmap operations. Using Higher-Rank Trait Bounds (HRTBs) to effectively define
 /// an associated type that has a lifetime parameter, without tagging the `Bitmap` trait with
@@ -35,7 +23,11 @@ pub trait BitmapSlice: Bitmap + Clone + Debug + for<'a> WithBitmapSlice<'a, S = 
 /// defined for `()`.
 // These methods represent the core functionality that's required by `vm-memory` abstractions
 // to implement generic tracking logic, as well as tests that can be reused by different backends.
-pub trait Bitmap: for<'a> WithBitmapSlice<'a> {
+pub trait Bitmap: Clone {
+    ///
+    type Slice<'a>: Bitmap
+    where Self: 'a;
+
     /// Mark the memory range specified by the given `offset` and `len` as dirtied.
     fn mark_dirty(&self, offset: usize, len: usize);
 
@@ -44,19 +36,16 @@ pub trait Bitmap: for<'a> WithBitmapSlice<'a> {
 
     /// Return a `<Self as WithBitmapSlice>::S` slice of the current bitmap, starting at
     /// the specified `offset`.
-    fn slice_at(&self, offset: usize) -> <Self as WithBitmapSlice>::S;
+    fn slice_at(&self, offset: usize) -> Self::Slice<'_>;
 }
 
 /// A no-op `Bitmap` implementation that can be provided for backends that do not actually
 /// require the tracking functionality.
 
-impl<'a> WithBitmapSlice<'a> for () {
-    type S = Self;
-}
-
-impl BitmapSlice for () {}
 
 impl Bitmap for () {
+    type Slice<'a> = ();
+
     fn mark_dirty(&self, _offset: usize, _len: usize) {}
 
     fn dirty_at(&self, _offset: usize) -> bool {
@@ -68,16 +57,12 @@ impl Bitmap for () {
 
 /// A `Bitmap` and `BitmapSlice` implementation for `Option<B>`.
 
-impl<'a, B> WithBitmapSlice<'a> for Option<B>
-where
-    B: WithBitmapSlice<'a>,
-{
-    type S = Option<B::S>;
-}
 
-impl<B: BitmapSlice> BitmapSlice for Option<B> {}
 
 impl<B: Bitmap> Bitmap for Option<B> {
+    type Slice<'a> = Option<B::Slice<'a>>
+    where B:'a;
+
     fn mark_dirty(&self, offset: usize, len: usize) {
         if let Some(inner) = self {
             inner.mark_dirty(offset, len)
@@ -91,7 +76,7 @@ impl<B: Bitmap> Bitmap for Option<B> {
         false
     }
 
-    fn slice_at(&self, offset: usize) -> Option<<B as WithBitmapSlice>::S> {
+    fn slice_at(&self, offset: usize) -> Option<B::Slice<'_>> {
         if let Some(inner) = self {
             return Some(inner.slice_at(offset));
         }
@@ -101,7 +86,7 @@ impl<B: Bitmap> Bitmap for Option<B> {
 
 /// Helper type alias for referring to the `BitmapSlice` concrete type associated with
 /// an object `B: WithBitmapSlice<'a>`.
-pub type BS<'a, B> = <B as WithBitmapSlice<'a>>::S;
+pub type BS<'a, B> = <B as Bitmap>::Slice<'a>;
 
 /// Helper type alias for referring to the `BitmapSlice` concrete type associated with
 /// the memory regions of an object `M: GuestMemory`.
@@ -182,10 +167,10 @@ pub(crate) mod tests {
     // `G` represents a closure that translates an offset into an address value that's
     // relevant for the `Bytes` implementation being tested.
     impl<F, G, M, A> BytesHelper<F, G, M>
-    where
-        F: Fn(&M, usize, usize, bool) -> bool,
-        G: Fn(usize) -> A,
-        M: Bytes<A>,
+        where
+            F: Fn(&M, usize, usize, bool) -> bool,
+            G: Fn(usize) -> A,
+            M: Bytes<A>,
     {
         fn check_range(&self, m: &M, start: usize, len: usize, clean: bool) -> bool {
             (self.check_range_fn)(m, start, len, clean)
@@ -202,8 +187,8 @@ pub(crate) mod tests {
             dirty_len: usize,
             op: Op,
         ) -> Result<(), TestAccessError>
-        where
-            Op: Fn(&M, A),
+            where
+                Op: Fn(&M, A),
         {
             if !self.check_range(bytes, dirty_offset, dirty_len, true) {
                 return Err(TestAccessError::RangeCleanCheck);
@@ -225,12 +210,12 @@ pub(crate) mod tests {
     // implementations that aggregate entire ranges for accounting purposes (for example, doing
     // tracking at the page level).
     pub fn test_bytes<F, G, M, A>(bytes: &M, check_range_fn: F, address_fn: G, step: usize)
-    where
-        F: Fn(&M, usize, usize, bool) -> bool,
-        G: Fn(usize) -> A,
-        A: Copy,
-        M: Bytes<A>,
-        <M as Bytes<A>>::E: Debug,
+        where
+            F: Fn(&M, usize, usize, bool) -> bool,
+            G: Fn(usize) -> A,
+            A: Copy,
+            M: Bytes<A>,
+            <M as Bytes<A>>::E: Debug,
     {
         const BUF_SIZE: usize = 1024;
         let buf = vec![1u8; 1024];
@@ -249,21 +234,21 @@ pub(crate) mod tests {
         h.test_access(bytes, dirty_offset, BUF_SIZE, |m, addr| {
             assert_eq!(m.write(buf.as_slice(), addr).unwrap(), BUF_SIZE)
         })
-        .unwrap();
+            .unwrap();
         dirty_offset += step;
 
         // Test `write_slice`.
         h.test_access(bytes, dirty_offset, BUF_SIZE, |m, addr| {
             m.write_slice(buf.as_slice(), addr).unwrap()
         })
-        .unwrap();
+            .unwrap();
         dirty_offset += step;
 
         // Test `write_obj`.
         h.test_access(bytes, dirty_offset, size_of_val(&val), |m, addr| {
             m.write_obj(val, addr).unwrap()
         })
-        .unwrap();
+            .unwrap();
         dirty_offset += step;
 
         // Test `read_from`.
@@ -274,7 +259,7 @@ pub(crate) mod tests {
                 BUF_SIZE
             )
         })
-        .unwrap();
+            .unwrap();
         dirty_offset += step;
 
         // Test `read_exact_from`.
@@ -283,14 +268,14 @@ pub(crate) mod tests {
             m.read_exact_from(addr, &mut Cursor::new(&buf), BUF_SIZE)
                 .unwrap()
         })
-        .unwrap();
+            .unwrap();
         dirty_offset += step;
 
         // Test `store`.
         h.test_access(bytes, dirty_offset, size_of_val(&val), |m, addr| {
             m.store(val, addr, Ordering::Relaxed).unwrap()
         })
-        .unwrap();
+            .unwrap();
     }
 
     // This function and the next are currently conditionally compiled because we only use
@@ -334,9 +319,9 @@ pub(crate) mod tests {
     #[cfg(feature = "backend-mmap")]
     // Assumptions about M generated by f ...
     pub fn test_guest_memory_and_region<M, F>(f: F)
-    where
-        M: GuestMemory,
-        F: Fn() -> M,
+        where
+            M: GuestMemory,
+            F: Fn() -> M,
     {
         let m = f();
         let dirty_addr = GuestAddress(0x1000);
@@ -371,7 +356,7 @@ pub(crate) mod tests {
                 }
                 Ok(size)
             })
-            .unwrap();
+                .unwrap();
 
             check_result
         };
