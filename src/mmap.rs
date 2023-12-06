@@ -633,7 +633,7 @@ impl<'a, B: 'a> GuestMemoryIterator<'a, GuestRegionMmap<B>> for GuestMemoryMmap<
 impl<B: Bitmap + 'static> GuestMemory for GuestMemoryMmap<B> {
     type R = GuestRegionMmap<B>;
 
-    type I = Self;
+    type Iter<'a> = Iter<'a, B>;
 
     fn num_regions(&self) -> usize {
         self.regions.len()

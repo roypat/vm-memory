@@ -471,8 +471,9 @@ pub trait GuestMemory {
     /// Type of objects hosted by the address space.
     type R: GuestMemoryRegion;
 
-    /// Lifetime generic associated iterators. Usually this is just `Self`.
-    type I: for<'a> GuestMemoryIterator<'a, Self::R>;
+    ///
+    type Iter<'a>: Iterator<Item = &'a Self::R>
+    where Self::R: 'a, Self: 'a;
 
     /// Returns the number of regions in the collection.
     fn num_regions(&self) -> usize;
@@ -533,7 +534,7 @@ pub trait GuestMemory {
     /// assert_eq!(3, total_size)
     /// # }
     /// ```
-    fn iter(&self) -> <Self::I as GuestMemoryIterator<Self::R>>::Iter;
+    fn iter(&self) -> Self::Iter<'_>;
 
     /// Applies two functions, specified as callbacks, on the inner memory regions.
     ///
