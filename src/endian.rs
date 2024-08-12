@@ -35,8 +35,6 @@
 
 use std::mem::{align_of, size_of};
 
-use crate::bytes::ByteValued;
-
 macro_rules! const_assert {
     ($condition:expr) => {
         let _ = [(); 0 - !$condition as usize];
@@ -48,7 +46,7 @@ macro_rules! endian_type {
         /// An unsigned integer type of with an explicit endianness.
         ///
         /// See module level documentation for examples.
-        #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+        #[derive(Copy, Clone, Eq, PartialEq, Debug, Default, zerocopy::FromBytes, zerocopy::FromZeroes)]
         pub struct $new_type($old_type);
 
         impl $new_type {
@@ -62,10 +60,6 @@ macro_rules! endian_type {
                 $old_type::$from_new(self.0)
             }
         }
-
-        // SAFETY: Safe because we are using this for implementing ByteValued for endian types
-        // which are POD.
-        unsafe impl ByteValued for $new_type {}
 
         impl PartialEq<$old_type> for $new_type {
             fn eq(&self, other: &$old_type) -> bool {

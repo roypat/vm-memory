@@ -32,10 +32,11 @@ use std::ptr::{read_volatile, write_volatile};
 use std::result;
 use std::sync::atomic::Ordering;
 use std::usize;
+use zerocopy::FromBytes;
 
 use crate::atomic_integer::AtomicInteger;
 use crate::bitmap::{Bitmap, BitmapSlice, BS};
-use crate::{AtomicAccess, ByteValued, Bytes};
+use crate::{AtomicAccess, Bytes};
 
 #[cfg(all(feature = "backend-mmap", feature = "xen", unix))]
 use crate::mmap_xen::{MmapXen as MmapInfo, MmapXenSlice};
@@ -122,7 +123,7 @@ pub trait VolatileMemory {
     }
 
     /// Gets a `VolatileRef` at `offset`.
-    fn get_ref<T: ByteValued>(&self, offset: usize) -> Result<VolatileRef<T, BS<Self::B>>> {
+    fn get_ref<T: FromBytes>(&self, offset: usize) -> Result<VolatileRef<T, BS<Self::B>>> {
         let slice = self.get_slice(offset, size_of::<T>())?;
 
         assert_eq!(
@@ -147,7 +148,7 @@ pub trait VolatileMemory {
 
     /// Returns a [`VolatileArrayRef`](struct.VolatileArrayRef.html) of `n` elements starting at
     /// `offset`.
-    fn get_array_ref<T: ByteValued>(
+    fn get_array_ref<T: FromBytes + Copy>(
         &self,
         offset: usize,
         n: usize,
@@ -193,7 +194,7 @@ pub trait VolatileMemory {
     ///
     /// If the resulting pointer is not aligned, this method will return an
     /// [`Error`](enum.Error.html).
-    unsafe fn aligned_as_ref<T: ByteValued>(&self, offset: usize) -> Result<&T> {
+    unsafe fn aligned_as_ref<T: FromBytes>(&self, offset: usize) -> Result<&T> {
         let slice = self.get_slice(offset, size_of::<T>())?;
         slice.check_alignment(align_of::<T>())?;
 
@@ -226,7 +227,7 @@ pub trait VolatileMemory {
     ///
     /// If the resulting pointer is not aligned, this method will return an
     /// [`Error`](enum.Error.html).
-    unsafe fn aligned_as_mut<T: ByteValued>(&self, offset: usize) -> Result<&mut T> {
+    unsafe fn aligned_as_mut<T: FromBytes>(&self, offset: usize) -> Result<&mut T> {
         let slice = self.get_slice(offset, size_of::<T>())?;
         slice.check_alignment(align_of::<T>())?;
 
@@ -551,7 +552,7 @@ impl<'a, B: BitmapSlice> VolatileSlice<'a, B> {
     /// ```
     pub fn copy_to<T>(&self, buf: &mut [T]) -> usize
     where
-        T: ByteValued,
+        T: FromBytes + Copy,
     {
         // A fast path for u8/i8
         if size_of::<T>() == 1 {
@@ -630,7 +631,7 @@ impl<'a, B: BitmapSlice> VolatileSlice<'a, B> {
     /// ```
     pub fn copy_from<T>(&self, buf: &[T])
     where
-        T: ByteValued,
+        T: FromBytes + Copy,
     {
         // A fast path for u8/i8
         if size_of::<T>() == 1 {
@@ -1041,7 +1042,7 @@ pub struct VolatileRef<'a, T, B = ()> {
 
 impl<'a, T> VolatileRef<'a, T, ()>
 where
-    T: ByteValued,
+    T: FromBytes,
 {
     /// Creates a [`VolatileRef`](struct.VolatileRef.html) to an instance of `T`.
     ///
@@ -1059,7 +1060,7 @@ where
 #[allow(clippy::len_without_is_empty)]
 impl<'a, T, B> VolatileRef<'a, T, B>
 where
-    T: ByteValued,
+    T: FromBytes,
     B: BitmapSlice,
 {
     /// Creates a [`VolatileRef`](struct.VolatileRef.html) to an instance of `T`, using the
@@ -1184,7 +1185,7 @@ pub struct VolatileArrayRef<'a, T, B = ()> {
 
 impl<'a, T> VolatileArrayRef<'a, T>
 where
-    T: ByteValued,
+    T: FromBytes + Copy,
 {
     /// Creates a [`VolatileArrayRef`](struct.VolatileArrayRef.html) to an array of elements of
     /// type `T`.
@@ -1202,7 +1203,7 @@ where
 
 impl<'a, T, B> VolatileArrayRef<'a, T, B>
 where
-    T: ByteValued,
+    T: FromBytes + Copy,
     B: BitmapSlice,
 {
     /// Creates a [`VolatileArrayRef`](struct.VolatileArrayRef.html) to an array of elements of
@@ -1644,6 +1645,7 @@ mod tests {
     use matches::assert_matches;
     use std::num::NonZeroUsize;
     use vmm_sys_util::tempfile::TempFile;
+    use zerocopy::{FromZeroes, FromBytes, AsBytes};
 
     use crate::bitmap::tests::{
         check_range, range_is_clean, range_is_dirty, test_bytes, test_volatile_memory,
@@ -2171,12 +2173,12 @@ mod tests {
 
     #[test]
     fn test_read_from_exceeds_size() {
-        #[derive(Debug, Default, Copy, Clone)]
+        #[derive(Debug, Default, Copy, Clone, FromBytes, FromZeroes, AsBytes)]
+        #[repr(C)]
         struct BytesToRead {
             _val1: u128, // 16 bytes
             _val2: u128, // 16 bytes
         }
-        unsafe impl ByteValued for BytesToRead {}
         let cursor_size = 20;
         let image = vec![1u8; cursor_size];
 
@@ -2186,7 +2188,7 @@ mod tests {
         assert_eq!(
             image
                 .as_slice()
-                .read_volatile(&mut bytes_to_read.as_bytes())
+                .read_volatile(&mut VolatileSlice::from(bytes_to_read.as_bytes_mut()))
                 .unwrap(),
             cursor_size
         );
@@ -2406,7 +2408,7 @@ mod tests {
         index: usize,
         page_size: NonZeroUsize,
     ) where
-        T: ByteValued + From<u8>,
+        T: FromBytes + From<u8> + Copy,
     {
         let bitmap = AtomicBitmap::new(size_of_val(buf), page_size);
         let arr = unsafe {

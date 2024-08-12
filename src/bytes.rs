@@ -12,161 +12,15 @@
 //! data.
 
 use std::io::{Read, Write};
-use std::mem::{size_of, MaybeUninit};
 use std::result::Result;
-use std::slice::{from_raw_parts, from_raw_parts_mut};
 use std::sync::atomic::Ordering;
+use zerocopy::{AsBytes, FromBytes};
 
 use crate::atomic_integer::AtomicInteger;
-use crate::volatile_memory::VolatileSlice;
 
-/// Types for which it is safe to initialize from raw data.
-///
-/// # Safety
-///
-/// A type `T` is `ByteValued` if and only if it can be initialized by reading its contents from a
-/// byte array.  This is generally true for all plain-old-data structs.  It is notably not true for
-/// any type that includes a reference. It is generally also not safe for non-packed structs, as
-/// compiler-inserted padding is considered uninitialized memory, and thus reads/writing it will
-/// cause undefined behavior.
-///
-/// Implementing this trait guarantees that it is safe to instantiate the struct with random data.
-pub unsafe trait ByteValued: Copy + Send + Sync {
-    /// Converts a slice of raw data into a reference of `Self`.
-    ///
-    /// The value of `data` is not copied. Instead a reference is made from the given slice. The
-    /// value of `Self` will depend on the representation of the type in memory, and may change in
-    /// an unstable fashion.
-    ///
-    /// This will return `None` if the length of data does not match the size of `Self`, or if the
-    /// data is not aligned for the type of `Self`.
-    fn from_slice(data: &[u8]) -> Option<&Self> {
-        // Early out to avoid an unneeded `align_to` call.
-        if data.len() != size_of::<Self>() {
-            return None;
-        }
-
-        // SAFETY: Safe because the ByteValued trait asserts any data is valid for this type, and
-        // we ensured the size of the pointer's buffer is the correct size. The `align_to` method
-        // ensures that we don't have any unaligned references. This aliases a pointer, but because
-        // the pointer is from a const slice reference, there are no mutable aliases. Finally, the
-        // reference returned can not outlive data because they have equal implicit lifetime
-        // constraints.
-        match unsafe { data.align_to::<Self>() } {
-            ([], [mid], []) => Some(mid),
-            _ => None,
-        }
-    }
-
-    /// Converts a mutable slice of raw data into a mutable reference of `Self`.
-    ///
-    /// Because `Self` is made from a reference to the mutable slice, mutations to the returned
-    /// reference are immediately reflected in `data`. The value of the returned `Self` will depend
-    /// on the representation of the type in memory, and may change in an unstable fashion.
-    ///
-    /// This will return `None` if the length of data does not match the size of `Self`, or if the
-    /// data is not aligned for the type of `Self`.
-    fn from_mut_slice(data: &mut [u8]) -> Option<&mut Self> {
-        // Early out to avoid an unneeded `align_to_mut` call.
-        if data.len() != size_of::<Self>() {
-            return None;
-        }
-
-        // SAFETY: Safe because the ByteValued trait asserts any data is valid for this type, and
-        // we ensured the size of the pointer's buffer is the correct size. The `align_to` method
-        // ensures that we don't have any unaligned references. This aliases a pointer, but because
-        // the pointer is from a mut slice reference, we borrow the passed in mutable reference.
-        // Finally, the reference returned can not outlive data because they have equal implicit
-        // lifetime constraints.
-        match unsafe { data.align_to_mut::<Self>() } {
-            ([], [mid], []) => Some(mid),
-            _ => None,
-        }
-    }
-
-    /// Converts a reference to `self` into a slice of bytes.
-    ///
-    /// The value of `self` is not copied. Instead, the slice is made from a reference to `self`.
-    /// The value of bytes in the returned slice will depend on the representation of the type in
-    /// memory, and may change in an unstable fashion.
-    fn as_slice(&self) -> &[u8] {
-        // SAFETY: Safe because the entire size of self is accessible as bytes because the trait
-        // guarantees it. The lifetime of the returned slice is the same as the passed reference,
-        // so that no dangling pointers will result from this pointer alias.
-        unsafe { from_raw_parts(self as *const Self as *const u8, size_of::<Self>()) }
-    }
-
-    /// Converts a mutable reference to `self` into a mutable slice of bytes.
-    ///
-    /// Because the slice is made from a reference to `self`, mutations to the returned slice are
-    /// immediately reflected in `self`. The value of bytes in the returned slice will depend on
-    /// the representation of the type in memory, and may change in an unstable fashion.
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: Safe because the entire size of self is accessible as bytes because the trait
-        // guarantees it. The trait also guarantees that any combination of bytes is valid for this
-        // type, so modifying them in the form of a byte slice is valid. The lifetime of the
-        // returned slice is the same as the passed reference, so that no dangling pointers will
-        // result from this pointer alias. Although this does alias a mutable pointer, we do so by
-        // exclusively borrowing the given mutable reference.
-        unsafe { from_raw_parts_mut(self as *mut Self as *mut u8, size_of::<Self>()) }
-    }
-
-    /// Converts a mutable reference to `self` into a `VolatileSlice`.  This is
-    /// useful because `VolatileSlice` provides a `Bytes<usize>` implementation.
-    ///
-    /// # Safety
-    ///
-    /// Unlike most `VolatileMemory` implementation, this method requires an exclusive
-    /// reference to `self`; this trivially fulfills `VolatileSlice::new`'s requirement
-    /// that all accesses to `self` use volatile accesses (because there can
-    /// be no other accesses).
-    fn as_bytes(&mut self) -> VolatileSlice {
-        // SAFETY: This is safe because the lifetime is the same as self
-        unsafe { VolatileSlice::new(self as *mut Self as *mut _, size_of::<Self>()) }
-    }
-}
-
-macro_rules! byte_valued_array {
-    ($T:ty, $($N:expr)+) => {
-        $(
-            // SAFETY: All intrinsic types and arrays of intrinsic types are ByteValued.
-            // They are just numbers.
-            unsafe impl ByteValued for [$T; $N] {}
-        )+
-    }
-}
-
-macro_rules! byte_valued_type {
-    ($T:ty) => {
-        // SAFETY: Safe as long T is POD.
-        // We are using this macro to generated the implementation for integer types below.
-        unsafe impl ByteValued for $T {}
-        byte_valued_array! {
-            $T,
-            0  1  2  3  4  5  6  7  8  9
-            10 11 12 13 14 15 16 17 18 19
-            20 21 22 23 24 25 26 27 28 29
-            30 31 32
-        }
-    };
-}
-
-byte_valued_type!(u8);
-byte_valued_type!(u16);
-byte_valued_type!(u32);
-byte_valued_type!(u64);
-byte_valued_type!(u128);
-byte_valued_type!(usize);
-byte_valued_type!(i8);
-byte_valued_type!(i16);
-byte_valued_type!(i32);
-byte_valued_type!(i64);
-byte_valued_type!(i128);
-byte_valued_type!(isize);
 
 /// A trait used to identify types which can be accessed atomically by proxy.
-pub trait AtomicAccess:
-    ByteValued
+pub trait AtomicAccess: FromBytes
     // Could not find a more succinct way of stating that `Self` can be converted
     // into `Self::A::V`, and the other way around.
     + From<<<Self as AtomicAccess>::A as AtomicInteger>::V>
@@ -254,8 +108,8 @@ pub trait Bytes<A> {
     /// # Errors
     ///
     /// Returns an error if the object doesn't fit inside the container.
-    fn write_obj<T: ByteValued>(&self, val: T, addr: A) -> Result<(), Self::E> {
-        self.write_slice(val.as_slice(), addr)
+    fn write_obj<T: AsBytes>(&self, val: T, addr: A) -> Result<(), Self::E> {
+        self.write_slice(val.as_bytes(), addr)
     }
 
     /// Reads an object from the container at `addr`.
@@ -267,12 +121,9 @@ pub trait Bytes<A> {
     /// # Errors
     ///
     /// Returns an error if there's not enough data inside the container.
-    fn read_obj<T: ByteValued>(&self, addr: A) -> Result<T, Self::E> {
-        // SAFETY: ByteValued objects must be assignable from a arbitrary byte
-        // sequence and are mandated to be packed.
-        // Hence, zeroed memory is a fine initialization.
-        let mut result: T = unsafe { MaybeUninit::<T>::zeroed().assume_init() };
-        self.read_slice(result.as_mut_slice(), addr).map(|_| result)
+    fn read_obj<T: AsBytes + FromBytes>(&self, addr: A) -> Result<T, Self::E> {
+        let mut result = T::new_zeroed();
+        self.read_slice(result.as_bytes_mut(), addr).map(|_| result)
     }
 
     /// Reads up to `count` bytes from an object and writes them into the container at `addr`.
@@ -355,7 +206,11 @@ pub(crate) mod tests {
 
     use std::cell::RefCell;
     use std::fmt::Debug;
-    use std::mem::align_of;
+    use std::mem::{align_of, size_of};
+
+    use zerocopy::FromZeroes;
+
+    use crate::VolatileSlice;
 
     // Helper method to test atomic accesses for a given `b: Bytes` that's supposed to be
     // zero-initialized.
@@ -377,7 +232,7 @@ pub(crate) mod tests {
 
     fn check_byte_valued_type<T>()
     where
-        T: ByteValued + PartialEq + Debug + Default,
+        T: FromBytes + AsBytes + PartialEq + Debug + Default + Copy,
     {
         let mut data = [0u8; 48];
         let pre_len = {
@@ -388,10 +243,10 @@ pub(crate) mod tests {
             let aligned_data = &mut data[pre_len..pre_len + size_of::<T>()];
             {
                 let mut val: T = Default::default();
-                assert_eq!(T::from_slice(aligned_data), Some(&val));
-                assert_eq!(T::from_mut_slice(aligned_data), Some(&mut val));
-                assert_eq!(val.as_slice(), aligned_data);
-                assert_eq!(val.as_mut_slice(), aligned_data);
+                assert_eq!(T::ref_from(aligned_data), Some(&val));
+                assert_eq!(T::mut_from(aligned_data), Some(&mut val));
+                assert_eq!(val.as_bytes(), aligned_data);
+                assert_eq!(val.as_bytes_mut(), aligned_data);
             }
         }
         for i in 1..size_of::<T>().min(align_of::<T>()) {
@@ -400,15 +255,15 @@ pub(crate) mod tests {
             let unaligned_data = &mut data[begin..end];
             {
                 if align_of::<T>() != 1 {
-                    assert_eq!(T::from_slice(unaligned_data), None);
-                    assert_eq!(T::from_mut_slice(unaligned_data), None);
+                    assert_eq!(T::ref_from(unaligned_data), None);
+                    assert_eq!(T::mut_from(unaligned_data), None);
                 }
             }
         }
         // Check the early out condition
         {
-            assert!(T::from_slice(&data).is_none());
-            assert!(T::from_mut_slice(&mut data).is_none());
+            assert!(T::ref_from(&data).is_none());
+            assert!(T::mut_from(&mut data).is_none());
         }
     }
 
@@ -535,19 +390,17 @@ pub(crate) mod tests {
     }
 
     #[repr(C)]
-    #[derive(Copy, Clone, Default)]
+    #[derive(Copy, Clone, Default, FromBytes, FromZeroes, AsBytes)]
     struct S {
         a: u32,
         b: u32,
     }
 
-    unsafe impl ByteValued for S {}
-
     #[test]
     fn byte_valued_slice() {
         let a: [u8; 8] = [0, 0, 0, 0, 1, 1, 1, 1];
         let mut s: S = Default::default();
-        s.as_bytes().copy_from(&a);
+        VolatileSlice::from(s.as_bytes_mut()).copy_from(&a);
         assert_eq!(s.a, 0);
         assert_eq!(s.b, 0x0101_0101);
     }

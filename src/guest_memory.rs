@@ -1128,13 +1128,12 @@ mod tests {
     #![allow(clippy::undocumented_unsafe_blocks)]
     use super::*;
     #[cfg(feature = "backend-mmap")]
-    use crate::bytes::ByteValued;
-    #[cfg(feature = "backend-mmap")]
     use crate::GuestAddress;
     #[cfg(feature = "backend-mmap")]
     use std::time::{Duration, Instant};
 
     use vmm_sys_util::tempfile::TempFile;
+    use zerocopy::{FromBytes, FromZeroes, AsBytes};
 
     #[cfg(feature = "backend-mmap")]
     type GuestMemoryMmap = crate::GuestMemoryMmap<()>;
@@ -1204,41 +1203,33 @@ mod tests {
     // no mismatch is detected after performing accesses for a pre-determined amount of time.
     #[cfg(feature = "backend-mmap")]
     #[cfg(not(miri))] // This test simulates a race condition between guest and vmm
-    fn non_atomic_access_helper<T>()
-    where
-        T: ByteValued
-            + std::fmt::Debug
-            + From<u8>
-            + Into<u128>
-            + std::ops::Not<Output = T>
-            + PartialEq,
+    fn non_atomic_access_helper()
     {
         use std::mem;
         use std::thread;
 
         // A dummy type that's always going to have the same alignment as the first member,
         // and then adds some bytes at the end.
-        #[derive(Clone, Copy, Debug, Default, PartialEq)]
-        struct Data<T> {
-            val: T,
+        #[derive(Clone, Copy, Debug, Default, PartialEq, FromBytes, FromZeroes, AsBytes)]
+        #[repr(C)]
+        struct Data {
+            val: u16,
             some_bytes: [u8; 8],
         }
 
         // Some sanity checks.
-        assert_eq!(mem::align_of::<T>(), mem::align_of::<Data<T>>());
-        assert_eq!(mem::size_of::<T>(), mem::align_of::<T>());
+        assert_eq!(mem::align_of::<u16>(), mem::align_of::<Data>());
+        assert_eq!(mem::size_of::<u16>(), mem::align_of::<u16>());
 
         // There must be no padding bytes, as otherwise implementing ByteValued is UB
-        assert_eq!(mem::size_of::<Data<T>>(), mem::size_of::<T>() + 8);
-
-        unsafe impl<T: ByteValued> ByteValued for Data<T> {}
+        assert_eq!(mem::size_of::<Data>(), mem::size_of::<u16>() + 8);
 
         // Start of first guest memory region.
         let start = GuestAddress(0);
         let region_len = 1 << 12;
 
         // The address where we start writing/reading a Data<T> value.
-        let data_start = GuestAddress((region_len - mem::size_of::<T>()) as u64);
+        let data_start = GuestAddress((region_len - mem::size_of::<u16>()) as u64);
 
         let mem = GuestMemoryMmap::from_ranges(&[
             (start, region_len),
@@ -1252,31 +1243,31 @@ mod tests {
         let some_bytes = [1u8, 2, 4, 16, 32, 64, 128, 255];
 
         let mut data = Data {
-            val: T::from(0u8),
+            val: 0u16,
             some_bytes,
         };
 
         // Simple check that cross-region write/read is ok.
         mem.write_obj(data, data_start).unwrap();
-        let read_data = mem.read_obj::<Data<T>>(data_start).unwrap();
+        let read_data = mem.read_obj::<Data>(data_start).unwrap();
         assert_eq!(read_data, data);
 
         let t = thread::spawn(move || {
             let mut count: u64 = 0;
 
             loop_timed(Duration::from_secs(3), || {
-                let data = mem2.read_obj::<Data<T>>(data_start).unwrap();
+                let data = mem2.read_obj::<Data>(data_start).unwrap();
 
                 // Every time data is written to memory by the other thread, the value of
                 // data.val alternates between 0 and T::MAX, so the inner bytes should always
                 // have the same value. If they don't match, it means we read a partial value,
                 // so the access was not atomic.
-                let bytes = data.val.into().to_le_bytes();
-                for i in 1..mem::size_of::<T>() {
+                let bytes = data.val.to_le_bytes();
+                for i in 1..mem::size_of::<u16>() {
                     if bytes[0] != bytes[i] {
                         panic!(
                             "val bytes don't match {:?} after {} iterations",
-                            &bytes[..mem::size_of::<T>()],
+                            &bytes[..mem::size_of::<u16>()],
                             count
                         );
                     }
@@ -1298,19 +1289,17 @@ mod tests {
     #[test]
     #[cfg(not(miri))]
     fn test_non_atomic_access() {
-        non_atomic_access_helper::<u16>()
+        non_atomic_access_helper()
     }
 
     #[cfg(feature = "backend-mmap")]
     #[test]
     fn test_zero_length_accesses() {
-        #[derive(Default, Clone, Copy)]
+        #[derive(Default, Clone, Copy, FromBytes, FromZeroes, AsBytes)]
         #[repr(C)]
         struct ZeroSizedStruct {
             dummy: [u32; 0],
         }
-
-        unsafe impl ByteValued for ZeroSizedStruct {}
 
         let addr = GuestAddress(0x1000);
         let mem = GuestMemoryMmap::from_ranges(&[(addr, 0x1000)]).unwrap();
