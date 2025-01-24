@@ -999,7 +999,7 @@ impl<B: BitmapSlice> VolatileMemory for VolatileSlice<'_, B> {
         self.size
     }
 
-    fn get_slice(&self, offset: usize, count: usize) -> Result<VolatileSlice<B>> {
+    fn get_slice(&self, offset: usize, count: usize) -> Result<Self> {
         let _ = self.compute_end_offset(offset, count)?;
         Ok(
             // SAFETY: This is safe because the pointer is range-checked by compute_end_offset, and

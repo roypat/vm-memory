@@ -6,7 +6,7 @@
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::bitmap::{Bitmap, RefSlice, WithBitmapSlice};
+use crate::bitmap::{Bitmap, RefSlice, Sliceable};
 
 #[cfg(feature = "backend-mmap")]
 use crate::mmap::NewBitmap;
@@ -166,8 +166,8 @@ impl Clone for AtomicBitmap {
     }
 }
 
-impl<'a> WithBitmapSlice<'a> for AtomicBitmap {
-    type S = RefSlice<'a, Self>;
+impl Sliceable for AtomicBitmap {
+    type Slice<'a> = RefSlice<'a, Self>;
 }
 
 impl Bitmap for AtomicBitmap {
@@ -179,7 +179,7 @@ impl Bitmap for AtomicBitmap {
         self.is_addr_set(offset)
     }
 
-    fn slice_at(&self, offset: usize) -> <Self as WithBitmapSlice>::S {
+    fn slice_at(&self, offset: usize) -> RefSlice<Self> {
         RefSlice::new(self, offset)
     }
 }

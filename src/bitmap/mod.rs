@@ -9,51 +9,75 @@
 #[cfg(any(test, feature = "backend-bitmap"))]
 mod backend;
 
-use std::fmt::Debug;
-
 use crate::{GuestMemory, GuestMemoryRegion};
 
 #[cfg(any(test, feature = "backend-bitmap"))]
 pub use backend::{ArcSlice, AtomicBitmap, RefSlice};
 
-/// Trait implemented by types that support creating `BitmapSlice` objects.
-pub trait WithBitmapSlice<'a> {
-    /// Type of the bitmap slice.
-    type S: BitmapSlice;
+/// Trait for things that can be sliced.
+///
+/// Slicing can mean two things:
+/// 1. You have ownership of a bitmap, and slicing gives you a borrowed version of it (e.g.
+///    akin to `Vec<T> -> &'a [T]`)
+/// 2. You already have a borrowed version of a bitmap, and want to subslice it.
+///
+/// The trouble is that if we encode slicing at the type level, then each time a bitmap gets
+/// sliced, we get a new type - the return type of something like `bitmap.slice_at().slice_at()`
+/// would be `B::Slice<'a>::Slice<'b>`. Effectively, we're dealing with infinite types, which
+/// would make things like `VolatileSlice` that have a `B: Bitmap` parameter impossible to work
+/// with. To avoid this, the associated type has such a weird bound: It says that each subsequent
+/// slice of a slice must have the same type (including lifetimes) as the first slice. E.g.
+/// for all possible lifetimes `'b`, we have `B::Slice<'a>::Slice<'b> == B::Slice<'a>`.
+/// This then inductively collapses the type of subsequent `slice_at` calls to just be
+/// `B::Slice<'a>`. This simplification is based on the assumption that a function with the
+/// signature
+///
+/// ```no_run
+/// fn slice_at<'a, 'b, B: vm_memory::bitmap::Bitmap>(slice: &'b B::Slice<'a>) -> B::Slice<'a>
+/// where
+///   'a: 'b { todo!() }
+/// ```
+///
+/// can always be written (note the returned value having a lifetime of `'a`, which outlives
+/// the lifetime `'b` of the reference passed into the function). Conceptually, this makes sense
+/// though: Slicing multiple times will return references to the object originally being sliced,
+/// so the lifetime should reflect this tie to the original bitmap being sliced, and not a tie
+/// to a slice of the original bitmap.
+///
+/// Note: This trait cannot be merged with [`Bitmap`] because of rust-lang#87479 (it would
+/// force a `where Self: 'a` bound onto the associated type, which is imposible to satisfy
+/// for implementors due to the higher-ranked trait bound).
+pub trait Sliceable {
+    /// The type of the slice we get after calling [`Bitmap::slice_at`].
+    type Slice<'a>: BitmapSlice;
 }
 
-/// Trait used to represent that a `BitmapSlice` is a `Bitmap` itself, but also satisfies the
-/// restriction that slices created from it have the same type as `Self`.
-pub trait BitmapSlice: Bitmap + Clone + Debug + for<'a> WithBitmapSlice<'a, S = Self> {}
+pub trait BitmapSlice: for<'a> Bitmap<Slice<'a> = Self> where {}
 
-/// Common bitmap operations. Using Higher-Rank Trait Bounds (HRTBs) to effectively define
-/// an associated type that has a lifetime parameter, without tagging the `Bitmap` trait with
-/// a lifetime as well.
+impl<B> BitmapSlice for B where B: for<'a> Bitmap<Slice<'a> = B> {}
+
+/// Common bitmap operations.
 ///
 /// Using an associated type allows implementing the `Bitmap` and `BitmapSlice` functionality
 /// as a zero-cost abstraction when providing trivial implementations such as the one
 /// defined for `()`.
 // These methods represent the core functionality that's required by `vm-memory` abstractions
 // to implement generic tracking logic, as well as tests that can be reused by different backends.
-pub trait Bitmap: for<'a> WithBitmapSlice<'a> {
+pub trait Bitmap: Sliceable + Clone {
     /// Mark the memory range specified by the given `offset` and `len` as dirtied.
     fn mark_dirty(&self, offset: usize, len: usize);
 
     /// Check whether the specified `offset` is marked as dirty.
     fn dirty_at(&self, offset: usize) -> bool;
 
-    /// Return a `<Self as WithBitmapSlice>::S` slice of the current bitmap, starting at
+    /// Return a `BitmapSlice` slice of the current bitmap, starting at
     /// the specified `offset`.
-    fn slice_at(&self, offset: usize) -> <Self as WithBitmapSlice>::S;
+    fn slice_at(&self, offset: usize) -> Self::Slice<'_>;
 }
 
-/// A no-op `Bitmap` implementation that can be provided for backends that do not actually
-/// require the tracking functionality.
-impl WithBitmapSlice<'_> for () {
-    type S = Self;
+impl Sliceable for () {
+    type Slice<'a> = ();
 }
-
-impl BitmapSlice for () {}
 
 impl Bitmap for () {
     fn mark_dirty(&self, _offset: usize, _len: usize) {}
@@ -65,17 +89,12 @@ impl Bitmap for () {
     fn slice_at(&self, _offset: usize) -> Self {}
 }
 
-/// A `Bitmap` and `BitmapSlice` implementation for `Option<B>`.
-impl<'a, B> WithBitmapSlice<'a> for Option<B>
-where
-    B: WithBitmapSlice<'a>,
-{
-    type S = Option<B::S>;
+impl<B: Sliceable> Sliceable for Option<B> {
+    type Slice<'a> = Option<B::Slice<'a>>;
 }
 
-impl<B: BitmapSlice> BitmapSlice for Option<B> {}
-
-impl<B: Bitmap> Bitmap for Option<B> {
+impl<B: Bitmap> Bitmap for Option<B>
+{
     fn mark_dirty(&self, offset: usize, len: usize) {
         if let Some(inner) = self {
             inner.mark_dirty(offset, len)
@@ -89,7 +108,7 @@ impl<B: Bitmap> Bitmap for Option<B> {
         false
     }
 
-    fn slice_at(&self, offset: usize) -> Option<<B as WithBitmapSlice>::S> {
+    fn slice_at(&self, offset: usize) -> Self::Slice<'_> {
         if let Some(inner) = self {
             return Some(inner.slice_at(offset));
         }
@@ -99,7 +118,7 @@ impl<B: Bitmap> Bitmap for Option<B> {
 
 /// Helper type alias for referring to the `BitmapSlice` concrete type associated with
 /// an object `B: WithBitmapSlice<'a>`.
-pub type BS<'a, B> = <B as WithBitmapSlice<'a>>::S;
+pub type BS<'a, B> = <B as Sliceable>::Slice<'a>;
 
 /// Helper type alias for referring to the `BitmapSlice` concrete type associated with
 /// the memory regions of an object `M: GuestMemory`.
@@ -107,6 +126,7 @@ pub type MS<'a, M> = BS<'a, <<M as GuestMemory>::R as GuestMemoryRegion>::B>;
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::fmt::Debug;
     use super::*;
 
     use std::io::Cursor;
